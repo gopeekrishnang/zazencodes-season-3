@@ -16,8 +16,8 @@ Stop and tell the user if any of these fail:
 - Its default branch (`gh repo view --json defaultBranchRef`) exists on
   `origin`.
 - `claude --version` is 2.1.257 or later (the intake agent runs on Fable).
-- `python3 --version` is 3.10 or later. The scripts use only the standard
-  library.
+- `python3 --version` is 3.9 or later (the macOS system `/usr/bin/python3` is
+  fine). The scripts use only the standard library.
 - None of the files in step 1 already exist. If one does, show the user the
   clash and ask before overwriting.
 

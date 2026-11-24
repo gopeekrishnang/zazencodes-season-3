@@ -21,7 +21,7 @@ and dashboard, fills `factory/checks.sh` with your project's real test, lint,
 typecheck and build commands, tailors the reviewers to your stack, creates the
 escalation label, and checks that `checks.sh` passes on `main`.
 
-You need Claude Code 2.1.257 or later, `python3`, and an authenticated
+You need Claude Code 2.1.257 or later, `python3` 3.9 or later, and an authenticated
 [`gh`](https://cli.github.com/) that can push to the repo.
 
 ## The loop
