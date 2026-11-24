@@ -1,9 +1,9 @@
 # Software Factory for Claude Code (v2)
 
-A software factory that works through your GitHub issues. Label an issue
-`factory`, run `/factory run`, and agents decide whether it's worth building,
+A software factory that works through requests POSTed to a local REST API.
+Submit a request, run `/factory run`, and agents decide whether it's worth building,
 write a spec, build it, test it with your own checks, review it, and open a
-pull request that closes the issue. The approver merges what it's sure of and
+pull request for it. The approver merges what it's sure of and
 hands you the rest.
 
 ## Install
@@ -13,13 +13,13 @@ Open Claude Code in your project and paste:
 ```text
 Install this software factory in this project from the reference repository:
 
-https://github.com/zazencodes/zazencodes-season-3/tree/main/src/software-factory-claude-code-v2
+https://github.com/gopeekrishnang/zazencodes-season-3/tree/main/src/software-factory-claude-code-v2
 ```
 
 Your agent reads [`INSTALL.md`](INSTALL.md), copies the skill, agents, scripts
 and dashboard, fills `factory/checks.sh` with your project's real test, lint,
 typecheck and build commands, tailors the reviewers to your stack, creates the
-GitHub labels, and checks that `checks.sh` passes on `main`.
+escalation label, and checks that `checks.sh` passes on `main`.
 
 You need Claude Code 2.1.257 or later, `python3`, and an authenticated
 [`gh`](https://cli.github.com/) that can push to the repo.
@@ -27,35 +27,53 @@ You need Claude Code 2.1.257 or later, `python3`, and an authenticated
 ## The loop
 
 ```
-issues labeled `factory`
+POST /jobs → factory/requests/
         │
         ▼
-intake (fable) ── NEEDS-INFO → asks the author on the issue, waits for a reply
-        │         REJECT     → says why on the issue, removes the label
+intake (fable) ── NEEDS-INFO → asks the requester (GET /jobs/<id>), waits for POST …/reply
+        │         REJECT     → says why in the request's thread, closes it
         ▼ ACCEPT, maybe rescoped; rates risk + surfaces
 route (script)    picks reviewers and models from config.json
         ▼
 spec-writer (opus) → spec.md
         ▼
-builder (opus) → commits, pushes, opens a draft PR "Closes #n"
+builder (opus) → commits, pushes, opens a draft PR for the request
         ▼            ▲
 gate (script) ─FAIL──┤  factory/checks.sh; no reviewer runs on a failing build
         ▼ PASS       │
 reviewers ─CHANGES───┘  code (haiku | sonnet), + ux & ui on UI changes, + security
         ▼ all PASS
 approver (opus) ── APPROVE  → sync with main, gate again, gh pr merge
-                └─ ESCALATE → PR ready for you, issue labeled factory:needs-human
+                └─ ESCALATE → PR ready for you, PR labeled factory:needs-human
 ```
 
 One Claude Code session orchestrates every job, `concurrency` at a time
 (default 3). Each job gets its own git worktree and branch. All state lives in
 `factory/jobs/`, so if the session dies, `/factory run` picks every job back up.
 
+## The API
+
+```bash
+python3 factory/bin/serve        # 127.0.0.1:8765, no auth: keep it local
+
+curl -X POST localhost:8765/jobs -d '{"title": "Add subtract", "body": "...", "callback_url": "http://localhost:9000/hook"}'
+curl localhost:8765/jobs/1                      # stage, PR, cost, latest decision, messages
+curl -X POST localhost:8765/jobs/1/reply  -d '{"body": "answer to the question"}'
+curl -X POST localhost:8765/jobs/1/cancel -d '{"reason": "no longer needed"}'
+curl localhost:8765/jobs                        # every request and its stage
+```
+
+Or open <http://127.0.0.1:8765/> for a page to submit requests, read the factory's
+messages and answer questions (no login; local only).
+
+`callback_url` is optional; the factory POSTs `{request, event, ...}` to it on each
+message and on merge (fire-and-forget).
+
 ## Commands
 
 ```
-/factory run          drain the queue: every open `factory` issue, `concurrency` at a time; also resumes
-/factory run <n>      one issue now
+/factory run          drain the queue: every open request, `concurrency` at a time; also resumes
+/factory run <n>      one request now
 /factory <anything>   talk to the factory: ask about jobs, give feedback, file a feature
 ```
 
@@ -101,7 +119,10 @@ factory/
   bin/job                     the only writer of job.json; refuses illegal moves; merges
   bin/gate                    runs checks.sh in a job's worktree → round-N/checks.md
   bin/route                   risk + surfaces → the job's reviewers and models
+  bin/serve                   REST intake: POST /jobs, status, reply, cancel
+  bin/reqstore.py             the request store shared by serve and job
   dashboard.html              the board
+  requester.html              the page requesters use: submit, read replies, answer questions
 examples/jobs/                finished jobs from a real run
 INSTALL.md                    instructions for the installing agent
 DESIGN.md                     how it works and why
@@ -116,7 +137,7 @@ DESIGN.md                     how it works and why
 cd factory && python3 -m http.server
 ```
 
-Open <http://localhost:8000/dashboard.html>. Each job is a card with its issue
+Open <http://localhost:8000/dashboard.html>. Each job is a card with its request
 and PR, a row of gate and review chips per round, its risk, cost and
 time. Click a card to read every file the job wrote; each one opens with a
 short summary of what happened in that step. To see the example
@@ -145,11 +166,11 @@ They come from a test run on a small private calculator repo, with
 
 - It opens and merges real PRs and runs on your Claude plan. Start with
   `concurrency: 1` and read every PR until you trust it.
-- Intake runs on Fable once per issue. Depending on your plan, Fable can bill
+- Intake runs on Fable once per request. Depending on your plan, Fable can bill
   to usage credits rather than your plan's included usage.
-- Only issues labeled `factory` run, and only people with triage or write
-  access can add labels. Issue text reaches the agents as quoted data, never
-  as their instructions.
+- The API has no auth and binds to localhost only (it refuses other hosts), so
+  anything that can reach the port can queue work. Request text reaches the
+  agents as quoted data, never as their instructions.
 - The factory pushes only `factory/*` branches, merges only through
   `gh pr merge`, and never deploys.
 

@@ -18,22 +18,22 @@ skim a job on the dashboard and read the detail only where it matters.
 
 | Piece | File | Job |
 |---|---|---|
-| Queue | GitHub issues labeled `factory` | What to build. Anyone can file an issue; only people with triage or write access can label it. |
+| Queue | `factory/requests/<n>.json`, filled by `factory/bin/serve` (`POST /jobs`) | What to build. Localhost only, no auth; the machine is the trust boundary. |
 | Orchestrator | `.claude/skills/factory/SKILL.md` | The session that runs `/factory`. Starts jobs, spawns agents, calls the scripts. Writes nothing itself. |
 | Agents | `.claude/agents/*.md` | One file per role. Each reads files, writes exactly one file, and replies with one line. |
 | State | `factory/jobs/<job-id>/` | `job.json` plus every agent's file. Gitignored, local to the machine running the factory. |
-| Spine | `factory/bin/job`, `gate`, `route` | Deterministic. `job` is the only writer of `job.json` and refuses illegal moves. |
+| Spine | `factory/bin/job`, `gate`, `route`, `serve` | Deterministic. `job` is the only writer of `job.json` and refuses illegal moves. |
 | Checks | `factory/checks.sh` | The repo's test, lint, typecheck and build commands. The only repo-specific script. |
-| Exit | the PR | Every job ends as a PR that closes its issue. Merging it is the approval. |
+| Exit | the PR | Every job ends as a PR for its request. Merging it is the approval. |
 
 ## Pipeline
 
 ```
-intake (fable)     → ACCEPT (scope possibly changed) | NEEDS-INFO | REJECT, posted as an issue comment
+intake (fable)     → ACCEPT (scope possibly changed) | NEEDS-INFO | REJECT, posted to the requester
 route (script)     → reviewers + models from risk/surfaces via config.json
 worktree           → factory/<job-id> from origin/main
 spec-writer (opus) → spec.md
-builder            → commits; first round pushes + opens draft PR "Closes #<n>"
+builder            → commits; first round pushes + opens draft PR for the request
 gate (script)      → checks.sh; FAIL → builder gets the log, no reviewers spawned
 reviewers (routed) → parallel, WAIT FOR ALL; CHANGES → builder → gate → reviewers (max rounds)
 approver (opus)    → APPROVE: sync origin/main, gate, gh pr merge
@@ -46,9 +46,10 @@ The legal moves are in `TRANSITIONS` at the top of `factory/bin/job`.
 
 ## Decisions
 
-**Issues are the queue; you trigger the run.** `/factory run` drains every open
-`factory` issue. Nothing runs in GitHub Actions or on a schedule: the factory
-runs on your machine, on your Claude plan, when you start it. An issue can't
+**Requests are the queue; you trigger the run.** Work arrives as `POST /jobs` to a
+small stdlib server and lands in `factory/requests/`. `/factory run` drains every
+open request. Nothing runs on a schedule: the factory
+runs on your machine, on your Claude plan, when you start it. A request can't
 start a Claude Code session by itself, and keeping it local means your
 worktrees, dev servers and dashboard are right there.
 
@@ -60,10 +61,10 @@ files the next agent reads. Claude Code allows 20 concurrent subagents per
 session by default, which covers three jobs with four reviewers each.
 
 **Fable at the door, once.** Intake is the only Fable call per job. It decides
-whether the issue is worth building, rewrites the scope when the issue is too
+whether the request is worth building, rewrites the scope when the request is too
 big or vague, and asks the author when only they can answer. Its decision goes
-on the issue as a comment; the issue body stays as written. Questions go to
-the author before a spec exists, so the spec writer never stalls on one.
+in the request thread (GET /jobs/<id>); the request body stays as written. Questions go to
+the requester (answered with `POST /jobs/<id>/reply`) before a spec exists, so the spec writer never stalls on one.
 
 **Risk routes the work, a script does the routing.** Intake rates risk (`low`,
 `medium`, `high`) and surfaces (`ui`, `security`). `factory/bin/route` looks
@@ -96,7 +97,7 @@ as a nudge; the gate is still what decides.
 **Agents judge what scripts can't.** Reviewers don't re-run the test suite;
 they read the diff for correctness, scope, security, UX and visual fit.
 
-**A PR per issue, merged through GitHub.** v1 merged locally, which broke when
+**A PR per request, merged through GitHub.** v1 merged locally, which broke when
 the main checkout was dirty or busy. v2 merges with `gh pr merge`, so branch
 protection, required checks and the PR history all apply, and your main
 checkout is never touched. Before merging, the branch is synced with `main` and
@@ -104,11 +105,11 @@ gated again, because another job may have merged since it was tested.
 
 **You approve by merging.** The approver merges what it would merge itself and
 escalates the rest with a specific question. An escalated PR is ready for
-review and its issue is labeled `factory:needs-human`. Merge it to approve, or
+review and labeled `factory:needs-human`. Merge it to approve, or
 tell the factory what to change with `/factory <anything>`: your words go to
 the builder as `feedback-<k>.md` and the job runs another round. To drop a
 job that waits on you or on its author, tell the factory to reject it: the
-reason goes on the issue, its PR closes, and the job moves to Done.
+reason goes in the request thread, its PR closes, and the job moves to Done.
 
 **State is files, so runs resume.** Every fact the orchestrator needs is in
 `factory/jobs/`. If the session dies or compacts, a fresh `/factory run` reads
@@ -126,26 +127,35 @@ break this.
 
 ## Guardrails
 
-- Only issues labeled `factory` run. Labels need triage or write access, so the
-  label is the trust boundary.
-- Issue text reaches agents as quoted data in `issue.md`, with comments only
-  from the issue's author and the factory's operator. It is never part of a
+- Only requests in `factory/requests/` run. `serve` binds to localhost and has no
+  auth, so never expose the port.
+- Request text reaches agents as quoted data in `issue.md`, with messages only
+  from the requester, the factory and its operator. It is never part of a
   prompt. Intake, which reads it first, has no shell.
 - Agents push only `factory/*` branches. Only `factory/bin/job merge` merges,
   through `gh pr merge`. The factory never deploys.
-- One PR per issue; at most `max_rounds` build rounds per job before a human
+- One PR per request; at most `max_rounds` build rounds per job before a human
   is asked.
+
+## Intake API
+
+v2 originally read GitHub issues. Intake is now a REST API: `serve` validates and
+writes requests (size caps, an open-request cap, `http(s)`-only callbacks), and
+`job` reads them through `reqstore.py`, which both share. The request's
+`messages` list replaces issue comments; waiting state lives in `job.json`'s stage,
+so labels are used only on the escalated PR. Webhooks are fire-and-forget and never
+block a stage change. PRs and merging stay on GitHub.
 
 ## What changed from v1
 
 | v1 | v2 | Asked for by |
 |---|---|---|
-| `/factory <feature>`, one job per session | `/factory run` drains the issue queue, `concurrency` jobs at once, one orchestrator | Alex; @spec2k5, @MrHossamsaraya |
+| `/factory <feature>`, one job per session | `/factory run` drains the request queue, `concurrency` jobs at once, one orchestrator | Alex; @spec2k5, @MrHossamsaraya |
 | Copy-paste build prompt | One install prompt pointing at this folder | @felipeclavijo1736 |
 | Every job gets all four reviewers | Fable intake rates risk and surfaces; a script routes reviewers and models | @mptrista, @Robin-ox2mz |
 | Every verdict is an LLM opinion | `checks.sh` gates before review and before merge | @Robin-ox2mz |
-| Local `git merge`, needs a clean main checkout | A PR per issue, merged with `gh pr merge` | v1 on-camera merge failures |
+| Local `git merge`, needs a clean main checkout | A PR per request, merged with `gh pr merge` | v1 on-camera merge failures |
 | `/factory approve` | Merge the PR on GitHub | v1 |
-| The spec writer can stall on questions | Intake asks on the issue and parks the job | @acidrazor |
+| The spec writer can stall on questions | Intake asks the requester and parks the job | @acidrazor |
 | Cost invisible | Cost and time per job on the dashboard and in the run summary | the most common comment |
 | No license | GPLv3, commercial licensing available | @mapledev9335 |

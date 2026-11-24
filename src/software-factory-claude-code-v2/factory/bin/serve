@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""REST intake for the factory. Replaces labeled GitHub issues as the queue.
+
+Usage:
+  serve [--host 127.0.0.1] [--port 8765]
+
+  POST /jobs                {title, body, submitter?, callback_url?}  → 201 {id, status_url}
+  GET  /                                                              → the requester page (factory/requester.html)
+  GET  /jobs                                                          → every request and its stage
+  GET  /jobs/<id>                                                     → stage, PR, cost, latest decision, messages
+  POST /jobs/<id>/reply     {body}     answer a needs-info question → 200
+  POST /jobs/<id>/cancel    {reason?}  drop a request that waits on you or hasn't started → 200
+
+<id> is the request number. Requests land in factory/requests/<id>.json;
+`/factory run` drains them. Binds to localhost only, with no auth: anything that
+can reach the port can queue work, so never expose it.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import reqstore  # noqa: E402
+
+FACTORY = reqstore.FACTORY
+JOBS = FACTORY / "jobs"
+MAX_BODY = reqstore.LIMITS.get("max_body_bytes", 65536) + 4096
+
+
+def find_job(n):
+    for p in JOBS.glob("*/job.json") if JOBS.exists() else []:
+        j = json.loads(p.read_text())
+        if j.get("request") == n:
+            return j
+    return None
+
+
+def latest_decision(job):
+    """Text of intake.md or decision.md, whichever the job wrote last."""
+    files = [f for f in (JOBS / job["id"] / "intake.md", JOBS / job["id"] / "decision.md") if f.exists()]
+    if not files:
+        return None
+    return max(files, key=lambda f: f.stat().st_mtime).read_text()
+
+
+def view(r, detail=False):
+    job = find_job(r["id"])
+    stage = job["stage"] if job else ("queued" if r["status"] == "open" else "cancelled")
+    out = {"id": r["id"], "title": r["title"], "status": r["status"], "stage": stage,
+           "job": job["id"] if job else None,
+           # needs-info, but the requester already answered: waiting on /factory run
+           "answered": stage == "needs-info" and reqstore.replied_since_question(r)}
+    if detail:
+        out.update({
+            "body": r["body"], "created": r["created"], "messages": r["messages"],
+            "round": job["round"] if job else 0,
+            "pr": job["pr"] if job else None, "pr_url": job["pr_url"] if job else None,
+            "cost_usd": job["cost_usd"] if job else 0,
+            "latest": latest_decision(job) if job else None,
+        })
+    return out
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "factory-serve"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("serve: " + fmt % args + "\n")
+
+    def send(self, status, payload):
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def read_json(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_BODY:
+            raise reqstore.BadRequest("body too large", 413)
+        try:
+            data = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            raise reqstore.BadRequest("invalid JSON")
+        if not isinstance(data, dict):
+            raise reqstore.BadRequest("expected a JSON object")
+        return data
+
+    def route(self, method):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if method == "POST" and path == "/jobs":
+            d = self.read_json()
+            for k in ("title", "body", "submitter", "callback_url"):
+                if d.get(k) is not None and not isinstance(d[k], str):
+                    raise reqstore.BadRequest(f"{k} must be a string")
+            r = reqstore.create(d.get("title"), d.get("body"), d.get("submitter"), d.get("callback_url"))
+            return 201, {"id": r["id"], "status_url": f"/jobs/{r['id']}"}
+        if method == "GET" and path == "/jobs":
+            return 200, [view(r) for r in reqstore.all_requests()]
+        m = re.fullmatch(r"/jobs/(\d+)(?:/(reply|cancel))?", path)
+        if not m:
+            raise reqstore.BadRequest("not found", 404)
+        n, action = int(m.group(1)), m.group(2)
+        r = reqstore.load(n)
+        if method == "GET" and not action:
+            return 200, view(r, detail=True)
+        if method == "POST" and action == "reply":
+            d = self.read_json()
+            text = d.get("body")
+            if not isinstance(text, str) or not text.strip():
+                raise reqstore.BadRequest("body is required")
+            if len(text.encode()) > reqstore.LIMITS.get("max_body_bytes", 65536):
+                raise reqstore.BadRequest("body too large", 413)
+            job = find_job(n)
+            if r["status"] != "open" or not job or job["stage"] != "needs-info":
+                raise reqstore.BadRequest("the job isn't waiting for a reply", 409)
+            reqstore.post_message(n, "requester", text.strip(), event="reply")
+            return 200, view(reqstore.load(n))
+        if method == "POST" and action == "cancel":
+            d = self.read_json()
+            reason = (d.get("reason") or "Cancelled by the requester.").strip()
+            job = find_job(n)
+            if r["status"] != "open":
+                raise reqstore.BadRequest("the request is already closed", 409)
+            if job is None:
+                reqstore.post_message(n, "requester", f"Cancelled: {reason}")
+                reqstore.close(n)
+            elif job["stage"] in {"needs-info", "needs-human"}:
+                res = subprocess.run([str(FACTORY / "bin" / "job"), "reject", job["id"]],
+                                     input=reason, capture_output=True, text=True)
+                if res.returncode != 0:
+                    raise reqstore.BadRequest(res.stderr.strip() or "cancel failed", 409)
+            else:
+                raise reqstore.BadRequest(f"the job is running ({job['stage']}); cancel it once it waits", 409)
+            return 200, view(reqstore.load(n))
+        raise reqstore.BadRequest("method not allowed", 405)
+
+    def handle_any(self, method):
+        try:
+            status, payload = self.route(method)
+        except reqstore.BadRequest as e:
+            status, payload = e.status, {"error": str(e)}
+        except Exception as e:  # keep the server alive
+            status, payload = 500, {"error": f"internal error: {e}"}
+        self.send(status, payload)
+
+    def do_GET(self):
+        if self.path.split("?", 1)[0] in {"/", "/index.html", "/requester.html"}:
+            data = (FACTORY / "requester.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.handle_any("GET")
+
+    def do_POST(self):
+        self.handle_any("POST")
+
+
+def main():
+    cfg = reqstore.CONFIG.get("server", {})
+    ap = argparse.ArgumentParser(description="Factory REST intake")
+    ap.add_argument("--host", default=cfg.get("host", "127.0.0.1"))
+    ap.add_argument("--port", type=int, default=cfg.get("port", 8765))
+    args = ap.parse_args()
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        sys.exit("serve: refusing to bind to a non-local address; there is no auth")
+    reqstore.REQUESTS.mkdir(parents=True, exist_ok=True)
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"serve: listening on http://{args.host}:{args.port}", file=sys.stderr)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

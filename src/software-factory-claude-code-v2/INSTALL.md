@@ -5,7 +5,7 @@ what's generic, adapt what's repo-specific, verify it, and report. Work in the
 project's root. Don't clone this repository.
 
 The source is the folder the user pointed you at. On GitHub, read files from
-`https://raw.githubusercontent.com/zazencodes/zazencodes-season-3/main/src/software-factory-claude-code-v2/<path>`.
+`https://raw.githubusercontent.com/gopeekrishnang/zazencodes-season-3/main/src/software-factory-claude-code-v2/<path>`.
 
 ## 0. Check the project
 
@@ -40,15 +40,18 @@ factory/checks.sh
 factory/bin/job
 factory/bin/gate
 factory/bin/route
+factory/bin/serve
+factory/bin/reqstore.py
+factory/requester.html
 factory/dashboard.html
 ```
 
 ```bash
-SRC=https://raw.githubusercontent.com/zazencodes/zazencodes-season-3/main/src/software-factory-claude-code-v2
+SRC=https://raw.githubusercontent.com/gopeekrishnang/zazencodes-season-3/main/src/software-factory-claude-code-v2
 for f in <the paths above>; do
   mkdir -p "$(dirname "$f")" && curl -fsSL "$SRC/$f" -o "$f"
 done
-chmod +x factory/checks.sh factory/bin/job factory/bin/gate factory/bin/route
+chmod +x factory/checks.sh factory/bin/job factory/bin/gate factory/bin/route factory/bin/serve
 ```
 
 Don't copy `README.md`, `DESIGN.md`, `INSTALL.md`, `LICENSE`, `examples/` or
@@ -77,6 +80,8 @@ It must be non-interactive, must not rewrite files (no `--fix`, no
   Add a path only when no job should ever change it. They are fnmatch
   patterns, so `*` also matches `/`.
 - `ports`: move `base` if the project already uses ports 5100–5199.
+- `server.port`: the intake API's port (default 8765, host 127.0.0.1). Change it if
+  something else uses it. Leave `host` alone: `serve` refuses non-local hosts.
 - Leave `concurrency`, `max_rounds`, `routing`, `surface_reviewers` and
   `prices_usd_per_mtok` as they are unless the user asks.
 
@@ -105,9 +110,10 @@ Then add a short section:
 ```markdown
 ## Software factory
 
-`/factory run` builds every open GitHub issue labeled `factory` through
-intake → spec → build → gate → review → approve, one PR per issue. State is in
-`factory/jobs/` (gitignored); `factory/bin/job` is its only writer. Checks:
+`/factory run` builds every open request queued through the factory's REST API
+(`factory/bin/serve`, `POST /jobs`) via
+intake → spec → build → gate → review → approve, one PR per request. State is in
+`factory/jobs/` and `factory/requests/` (gitignored); `factory/bin/job` is its only writer. Checks:
 `factory/checks.sh`. Dashboard: `cd factory && python3 -m http.server`, then
 open http://localhost:8000/dashboard.html.
 
@@ -116,25 +122,25 @@ Each job works in its own git worktree, a full checkout of the repo at
 read `.gitignore` sees those copies too; exclude `.worktrees/` in its config.
 ```
 
-**`.gitignore`.** Append these two lines:
+**`.gitignore`.** Append these three lines:
 
 ```gitignore
 /factory/jobs/
+/factory/requests/
 /.worktrees/
 ```
 
-`factory/jobs/` is runtime state (job metadata, specs, reviews, check logs)
-local to the machine running the factory. Each job's worktree is a full
-checkout in `.worktrees/<job-id>`. Neither belongs in the repo. Everything you
+`factory/jobs/` is runtime state (job metadata, specs, reviews, check logs) and
+`factory/requests/` holds the submitted requests; both are local to the machine
+running the factory. Each job's worktree is a full checkout in
+`.worktrees/<job-id>`. None of the three belongs in the repo. Everything you
 copied in step 1 does: the skill in `.claude/skills/factory/`, the agents in
 `.claude/agents/` and the rest of `factory/` are part of the project and get
 committed, so ignore only these two paths, never `.claude/` or `factory/`.
 
-**Labels.** Create them on GitHub:
+**Label.** Create the one label the factory still uses, on escalated PRs:
 
 ```bash
-gh label create factory --color 5319E7 --description "Build this with the software factory"
-gh label create factory:needs-info --color FBCA04 --description "The factory asked the author a question"
 gh label create factory:needs-human --color D93F0B --description "The factory needs a human decision on the PR"
 ```
 
@@ -144,11 +150,14 @@ gh label create factory:needs-human --color D93F0B --description "The factory ne
    If it fails there, the factory can never pass a job: fix the
    script (not the project) or tell the user what's broken.
 2. `factory/bin/job queue` runs without an error.
+   Then start `python3 factory/bin/serve &`, `curl -s -X POST localhost:<port>/jobs -d '{"title":"install check","body":"ignore"}'`
+   returns `201` JSON with an `id`, and `curl -s localhost:<port>/jobs` lists it. Stop the
+   server, then delete `factory/requests/` so the check request isn't built.
 3. Each file in `.claude/agents/` has only these frontmatter keys: `name`,
    `description`, `tools`, `model`, and `hooks` on the builder. Claude Code
    ignores unknown keys without a warning, so a typo silently changes behaviour.
 4. `python3 -m json.tool factory/config.json` succeeds.
-5. `git check-ignore factory/jobs/x .worktrees/x` prints both paths, and
+5. `git check-ignore factory/jobs/x factory/requests/x .worktrees/x` prints all three paths, and
    `git status --porcelain --untracked-files=all` lists every file from step 1
    (the skill, the agents and `factory/`) as committable.
 
@@ -161,12 +170,15 @@ so the install must be on that branch there before the first run.
 
 Then tell the user, in a few lines:
 
-- Label one or two small issues `factory`, then run `/factory run` in Claude
-  Code from the project root.
+- Start the intake server with `python3 factory/bin/serve` (localhost only, no
+  auth), submit one or two small requests with
+  `curl -X POST localhost:8765/jobs -d '{"title": "...", "body": "..."}'`,
+  then run `/factory run` in Claude Code from the project root. Poll
+  `GET /jobs/<id>`; answer questions with `POST /jobs/<id>/reply`.
 - Every job ends as a PR. The approver merges what it approves; the rest wait
-  labeled `factory:needs-human`. Approve one by merging it on GitHub, or tell
+  labeled `factory:needs-human` on the PR. Approve one by merging it on GitHub, or tell
   the factory what to change with `/factory <anything>`.
-- Intake runs on Fable, once per issue. Depending on their plan, Fable can
+- Intake runs on Fable, once per request. Depending on their plan, Fable can
   bill to usage credits rather than the plan's included usage.
 - To start carefully, set `concurrency` to 1 in `factory/config.json` and read
   every PR until they trust it.
