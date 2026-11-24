@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Software Factory: requests</title>
+<style>
+  :root {
+    --bg: #14151b; --panel: #1a1c24; --card: #20222c; --card-hover: #252835; --line: #2b2e3b;
+    --text: #e4e5ea; --muted: #868ba0; --faint: #5b6075;
+    --active: #8be9fd; --pass: #50fa7b; --changes: #ffb86c; --human: #ff5555; --merged: #bd93f9;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }
+  button, input, textarea { font: inherit; color: inherit; }
+  header { padding: 28px 32px 8px; display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .status { font: 12px var(--mono); color: var(--muted); }
+  .status.error { color: var(--human); }
+  .note { margin: 4px 32px 0; font: 12px var(--mono); color: var(--faint); }
+  main { display: grid; grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); gap: 24px; padding: 20px 32px 40px; align-items: start; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .panel + .panel { margin-top: 16px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea { width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  textarea { min-height: 110px; resize: vertical; }
+  input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--active); outline-offset: 1px; }
+  .btn { margin-top: 12px; background: var(--active); color: #0c1d22; border: 0; border-radius: 6px; padding: 8px 14px; font-weight: 600; cursor: pointer; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 400; }
+  .err { color: var(--human); font: 12px var(--mono); margin-top: 8px; min-height: 1em; }
+  .row { display: block; width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+  .row:hover { background: var(--card-hover); }
+  .row[aria-current="true"] { border-color: var(--active); }
+  .row .t { display: flex; justify-content: space-between; gap: 8px; }
+  .row .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .meta { font: 12px var(--mono); color: var(--muted); margin-top: 2px; }
+  .chip { font: 11px var(--mono); padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; color: var(--muted); }
+  .chip.run { color: var(--active); border-color: var(--active); }
+  .chip.ask { color: var(--changes); border-color: var(--changes); }
+  .chip.human, .chip.rejected { color: var(--human); border-color: var(--human); }
+  .chip.merged { color: var(--merged); border-color: var(--merged); }
+  .empty { color: var(--faint); padding: 8px 0; }
+  .msg { border-left: 3px solid var(--line); padding: 4px 0 4px 12px; margin: 12px 0; }
+  .msg.factory { border-color: var(--active); }
+  .msg.requester, .msg.operator { border-color: var(--pass); }
+  .msg .who { font: 12px var(--mono); color: var(--muted); }
+  .msg .txt { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
+  .ask-box { border: 1px solid var(--changes); border-radius: 8px; padding: 12px; margin-top: 16px; }
+  .kv { font: 12px var(--mono); color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
+  a { color: var(--active); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Software Factory: requests</h1>
+  <span class="status" id="status">connecting…</span>
+</header>
+<p class="note">Local only. No login: anyone who can reach this page sees every request.</p>
+<main>
+  <div>
+    <section class="panel">
+      <h2>New request</h2>
+      <form id="new">
+        <label for="title">Title</label>
+        <input id="title" maxlength="200" required>
+        <label for="body">What should be built?</label>
+        <textarea id="body" required></textarea>
+        <label for="who">Your name (optional)</label>
+        <input id="who">
+        <button class="btn" id="send" type="submit">Submit</button>
+        <div class="err" id="new-err" role="alert"></div>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Requests</h2>
+      <div id="list"><div class="empty">Loading…</div></div>
+    </section>
+  </div>
+  <section class="panel" id="detail"><div class="empty">Select a request to see what the factory said.</div></section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id)
+let selected = null
+let busy = false  // don't rebuild the detail pane while the user is typing a reply
+
+const stageClass = (s) => ({
+  'needs-info': 'ask', 'needs-human': 'human', rejected: 'rejected', merged: 'merged',
+  queued: '', cancelled: '' }[s] ?? 'run')
+const stageText = (s, answered) => answered ? 'answered, waiting for the factory'
+  : ({ 'needs-info': 'needs your answer', 'needs-human': 'waiting for a human', queued: 'queued' }[s] ?? s)
+
+// All request text is untrusted: build the DOM with textContent, never innerHTML.
+function el(tag, cls, text) {
+  const e = document.createElement(tag)
+  if (cls) e.className = cls
+  if (text != null) e.textContent = text
+  return e
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  return data
+}
+
+function renderList(items) {
+  const box = $('list')
+  box.replaceChildren()
+  if (!items.length) { box.append(el('div', 'empty', 'No requests yet.')); return }
+  for (const r of items.slice().reverse()) {
+    const b = el('button', 'row')
+    b.type = 'button'
+    if (r.id === selected) b.setAttribute('aria-current', 'true')
+    const t = el('div', 't')
+    t.append(el('span', 'title', r.title), el('span', `chip ${r.answered ? '' : stageClass(r.stage)}`, stageText(r.stage, r.answered)))
+    b.append(t, el('div', 'meta', `#${r.id}${r.job ? ' · ' + r.job : ''}`))
+    b.onclick = () => { selected = r.id; busy = false; refresh() }
+    box.append(b)
+  }
+}
+
+function renderDetail(r) {
+  const box = $('detail')
+  box.replaceChildren()
+  const head = el('div', 't')
+  head.style.cssText = 'display:flex;justify-content:space-between;gap:8px;align-items:baseline'
+  head.append(el('h2', null, `#${r.id} ${r.title}`), el('span', `chip ${r.answered ? '' : stageClass(r.stage)}`, stageText(r.stage, r.answered)))
+  box.append(head)
+  const kv = el('div', 'kv')
+  kv.append(el('span', null, `round ${r.round}`), el('span', null, `$${(r.cost_usd || 0).toFixed(2)}`))
+  if (r.pr_url) { const a = el('a', null, `PR #${r.pr}`); a.href = r.pr_url; a.target = '_blank'; a.rel = 'noopener'; kv.append(a) }
+  else if (r.pr) kv.append(el('span', null, `PR #${r.pr}`))
+  box.append(kv)
+
+  const first = el('div', 'msg requester')
+  first.append(el('div', 'who', `request · ${r.created}`), el('div', 'txt', r.body))
+  box.append(first)
+  for (const m of r.messages) {
+    const d = el('div', `msg ${m.from}`)
+    d.append(el('div', 'who', `${m.from} · ${m.at}`), el('div', 'txt', m.body))
+    box.append(d)
+  }
+
+  if (r.answered) {
+    box.append(el('div', 'meta', 'You answered. The job continues the next time someone runs /factory run.'))
+  } else if (r.stage === 'needs-info' && r.status === 'open') {
+    const form = el('form', 'ask-box')
+    form.append(el('div', null, 'The factory asked a question. Your answer:'))
+    const ta = el('textarea'); ta.required = true; ta.setAttribute('aria-label', 'Your answer')
+    const send = el('button', 'btn', 'Send answer'); send.type = 'submit'
+    const err = el('div', 'err'); err.setAttribute('role', 'alert')
+    form.append(ta, send, err)
+    ta.onfocus = () => { busy = true }
+    ta.onblur = () => { busy = !!ta.value }
+    form.onsubmit = async (e) => {
+      e.preventDefault(); send.disabled = true
+      try { await api(`/jobs/${r.id}/reply`, { method: 'POST', body: JSON.stringify({ body: ta.value }) }); busy = false; refresh() }
+      catch (x) { err.textContent = x.message; send.disabled = false }
+    }
+    box.append(form)
+    box.append(el('div', 'meta', 'After you answer, someone must run /factory run for the job to continue.'))
+  } else if (r.status === 'open' && ['queued', 'needs-info', 'needs-human'].includes(r.stage)) {
+    const c = el('button', 'btn ghost', 'Cancel request'); c.type = 'button'
+    c.onclick = async () => {
+      if (!confirm('Cancel this request?')) return
+      try { await api(`/jobs/${r.id}/cancel`, { method: 'POST', body: '{}' }); refresh() }
+      catch (x) { alert(x.message) }
+    }
+    box.append(c)
+  }
+}
+
+async function refresh() {
+  try {
+    const items = await api('/jobs')
+    renderList(items)
+    if (selected != null && !busy) renderDetail(await api(`/jobs/${selected}`))
+    $('status').textContent = `updated ${new Date().toLocaleTimeString()}`
+    $('status').className = 'status'
+  } catch (e) {
+    $('status').textContent = `server unreachable: ${e.message}`
+    $('status').className = 'status error'
+  }
+}
+
+$('new').onsubmit = async (e) => {
+  e.preventDefault()
+  $('send').disabled = true; $('new-err').textContent = ''
+  try {
+    const r = await api('/jobs', { method: 'POST', body: JSON.stringify({
+      title: $('title').value, body: $('body').value, submitter: $('who').value || null }) })
+    $('title').value = ''; $('body').value = ''
+    selected = r.id; busy = false
+    refresh()
+  } catch (x) { $('new-err').textContent = x.message }
+  $('send').disabled = false
+}
+
+refresh()
+setInterval(refresh, 4000)
+</script>
+</body>
+</html>
